@@ -1,0 +1,142 @@
+<h1 id="zeromqakka-streams-activator-template">ZeroMQ/Akka streams activator template</h1>
+<h2 id="dependencies">Dependencies</h2>
+<p>Dependencies for using rx_zmq_streams in your code:</p>
+<pre><code>resolvers += &quot;zenaptix at bintray&quot; at &quot;http://dl.bintray.com/zenaptix/rx_zmq_streams&quot;  
+libraryDependencies += &quot;com.zenaptix&quot; %% &quot;rx_zmq_streams&quot; % &quot;0.3.1&quot;</code></pre>
+<h2 id="overview">Overview</h2>
+<p>This application is a somewhat heuristic implementation of Reactive Streams utilizing zeroMQ as transport layer<br />
+It creates a ReactiveZeroMQ Akka Extension that provides a:</p>
+<ol style="list-style-type: decimal">
+<li>pubSink that will transmit its data from an Akka Stream onto zeroMQ</li>
+<li>subSource that will receive data over zeroMQ and stream it out to a subsequent Akka Stream</li>
+<li>the pubSink and subSource are implementing the Reactive Streams protocol and as such allows for a back-pressure on the zeroMQ transmission</li>
+</ol>
+<p>It uses zeroMQ Pub/Sub socket as the transport for a Reactive Streams implementation with Akka Streams.<br />
+Akka Streams is an implementation of <a href="http://www.reactive-streams.org/">Reactive Streams</a><br />
+zeroMQ is a Socket Library disguised as a concurrency framework. &quot;Sockets on steroids&quot;<br />
+The project depends on either jeromq or jzmq</p>
+<pre><code>&quot;org.zeromq&quot; % &quot;jzmq&quot; % &quot;3.1.0&quot;  
+&quot;org.zeromq&quot; % &quot;jeromq&quot; % &quot;0.3.5&quot;  </code></pre>
+<h2 id="pubsink">pubSink</h2>
+<p>A pubSink is acquired from the RxZMQExtension and is used as a sink at the end of a Akka Stream. All the messages will be forwarded over zeroMQ to a subscriber (subSource)</p>
+<h2 id="subsource">subSource</h2>
+<p>A subSource is acquired from the RxZMQExtension and is used as a source at the start of a Akka Stream. All themessages received from the zeroMQ socket is pushed onto the Akka Stream.</p>
+<h2 id="example">Example</h2>
+<p>Below is a trivial example running a connected processes.</p>
+<p>Connecting over zeroMQ</p>
+<pre><code>import com.zenaptix.reactive.RxZMQExtension
+        
+import akka.actor.{Props, ActorSystem}
+import akka.stream.ActorFlowMaterializer
+import akka.stream.scaladsl.{Sink, Source}
+import akka.util.Timeout
+import com.typesafe.config.{Config, ConfigFactory}
+import com.typesafe.scalalogging.LazyLogging
+import zeromq.Message
+import scala.concurrent.duration._
+        
+class RxZMQExtensionExample {
+    implicit val timeout: Timeout = Timeout(5 seconds)
+    implicit val materializer = ActorFlowMaterializer()
+    val conf = ConfigFactory.load()
+    def rxZmq = RxZMQExtension(system)
+    val sourcePath = conf.getString(&quot;gateway.source_path&quot;)
+    val file = new File(sourcePath)
+// publish the messages from the file
+    SynchronousFileSource(file,13).map(b =&gt; {
+    println(s&quot;[SOURCE] -&gt; ${b.decodeString(&quot;UTF8&quot;)}&quot;)
+    Message(b)
+    }).runWith(rxZmq.pubSink())
+// receive the messages from the file
+    var i = 0
+    val subSource = rxZmq.subSource(&quot;0.0.0.0:5556&quot;)
+    subSource.map(
+        m =&gt; {
+        i += 1
+        println(s&quot;[SINK]] &lt;- ${m.part.utf8String}&quot;)
+    }).runWith(Sink.ignore)
+}</code></pre>
+<h2 id="testing-using-rxzmqextensionspec">Testing using RxZMQExtensionSpec</h2>
+<p>To run the above code - cd to the directory where the project was cloned and execute:</p>
+<pre><code>    export RX_ZMQ_INSTALL_DIR=`pwd`
+    sbt test
+    &lt;/pre&gt;</code></pre>
+<h2 id="testing-using-com.zenaptix.reactivepublisher-and-reactivesubscriber">Testing using com.zenaptix.ReactivePublisher and ReactiveSubscriber</h2>
+<p>The Reactive Publisher</p>
+<pre><code>package com.zenaptix.reactive
+    
+import java.io.File
+    
+import akka.actor.ActorSystem
+import akka.stream.ActorFlowMaterializer
+import akka.stream.io.SynchronousFileSource
+import com.typesafe.config.ConfigFactory
+import com.typesafe.scalalogging.LazyLogging
+    
+object ReactivePublisher extends App with LazyLogging {
+  implicit val system = ActorSystem(&quot;publisher&quot;)
+  implicit val materializer = ActorFlowMaterializer()
+  lazy val log = system.log
+  def rxZmq = RxZMQExtension(system)
+  val conf = ConfigFactory.load()
+  val sourcePath = conf.getString(&quot;gateway.source_path&quot;)
+  val file = new File(sourcePath)
+  SynchronousFileSource(file,13).map(b =&gt; {
+    logger.debug(s&quot;[SOURCE] -&gt; ${b.decodeString(&quot;UTF8&quot;)}&quot;)
+    Message(b)
+  }).runWith(rxZmq.pubSink())
+  system.awaitTermination()
+ }</code></pre>
+<p>Running</p>
+<pre><code>sbt
+&gt; project publisher
+&gt; run</code></pre>
+<p>The Reactive Subscriber</p>
+<pre><code>package com.zenaptix.reactive
+        
+import akka.actor.ActorSystem
+import akka.stream.ActorFlowMaterializer
+import akka.stream.scaladsl.Sink
+import com.typesafe.config.ConfigFactory
+import com.typesafe.scalalogging.LazyLogging
+        
+object ReactiveSubscriber extends App with LazyLogging {
+  implicit val system = ActorSystem(&quot;subscriber&quot;)
+  implicit val materializer = ActorFlowMaterializer()
+  def rxZmq = RxZMQExtension(system)
+  val conf = ConfigFactory.load()
+  val conn = s&quot;${conf.getString(&quot;zeromq.host&quot;)}:${conf.getInt(&quot;zeromq.port&quot;)}&quot;)
+  rxZmq.subSource(conn).map(m =&gt;
+    logger.debug(s&quot;SINK &lt;- ${m.part.decodeString(&quot;UTF8&quot;)}&quot;)).
+    runWith(Sink.ignore)
+}</code></pre>
+<p>Running:</p>
+<pre><code>sbt
+&gt; project subscriber
+&gt; run
+    &lt;/pre&gt;</code></pre>
+<h2 id="using-docker">Using Docker</h2>
+<p>The Publisher</p>
+<p>On OSX first install and run boot2docker:</p>
+<pre><code>export RX_ZMQ_INSTALL_DIR=`pwd`
+sbt
+&gt; project publisher
+&gt; docker:publishLocal
+&gt; exit
+docker run -v $RX_ZMQ_INSTALL_DIR/data:/data -p 5556:5556 -p 5557:5557 \
+        -d --name rx_zmq_publisher com.zenaptix/rx_zmq_publisher:v0.3.1</code></pre>
+<p>The Subscriber</p>
+<p>and again:</p>
+<pre><code>sbt
+project subscriber
+&gt; docker:publishLocal
+&gt; exit
+docker run -i -t --name rx_zmq_subscriber com.zenaptix:rx_zmq_subscriber:v0.3.1 -Dzeromq.host=$RXZMQ_PUBLISHER_IP</code></pre>
+<p>The Logs then view the publisher log:</p>
+<pre><code>docker logs rx_zmq_publisher</code></pre>
+<h2 id="message-exchange">Message Exchange</h2>
+<p>rx_zmq_streams is implemented using a Req/Rep channel for exchanging control messages, and a pub/sub channel for receiving the actual data.</p>
+<div class="figure">
+<img src="tutorial/rxzmq.png" alt="Image" />
+<p class="caption">Image</p>
+</div>
